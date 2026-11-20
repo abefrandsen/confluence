@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "confluence"
+version = "0.1.0"
+description = "Config-driven YAML data pipeline runner for modular function composition."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "omegaconf>=2.3.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
