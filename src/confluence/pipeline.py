@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import importlib
 import sys
+import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from omegaconf import DictConfig
 
-from confluence.builtins_scope import get_safe_builtins
+from confluence.builtins_scope import get_default_builtins
 from confluence.config import (
     PipelineConfig,
     StepConfig,
@@ -46,7 +47,7 @@ class Pipeline:
     ) -> None:
         self.config = config
         self.functions: dict[str, Any] = dict(functions) if functions else {}
-        self._builtins: dict[str, Any] = get_safe_builtins()
+        self._builtins: dict[str, Any] = get_default_builtins()
         self._imports: dict[str, Any] = {}
         self._imports_loaded = False
 
@@ -91,8 +92,8 @@ class Pipeline:
             except Exception as exc:
                 errors.append(f"Failed to import {mod_path!r}: {exc}")
 
+        self._imports = loaded
         if not errors:
-            self._imports = loaded
             self._imports_loaded = True
         return errors
 
@@ -105,13 +106,37 @@ class Pipeline:
         errors.extend(self._load_imports())
 
         static_scopes = (self.functions, self._imports, self._builtins)
+        named_static_scopes = (
+            ("functions", self.functions),
+            ("imports", self._imports),
+            ("builtins", self._builtins),
+        )
         static_names = set(self.functions) | set(self._imports) | set(self._builtins)
+
+        warned_keys: set[str] = set()
+
+        def _warn_if_shadowed(key: str, context: str) -> None:
+            if key in warned_keys:
+                return
+            for scope_name, scope in named_static_scopes:
+                if key in scope:
+                    warned_keys.add(key)
+                    warnings.warn(
+                        f"{context}: data key {key!r} shadows a name in {scope_name}",
+                        UserWarning,
+                        stacklevel=3,
+                    )
+                    break
 
         known_keys: set[str] = set()
         if self.config.inputs is not None:
+            for inp in self.config.inputs:
+                _warn_if_shadowed(inp, "Pipeline inputs")
             known_keys.update(self.config.inputs)
         if input_keys is not None:
             provided = set(input_keys)
+            for inp in provided:
+                _warn_if_shadowed(inp, "Runtime inputs")
             if self.config.inputs is not None:
                 missing_inputs = [k for k in self.config.inputs if k not in provided]
                 if missing_inputs:
@@ -167,6 +192,7 @@ class Pipeline:
                     if not isinstance(out_name, str) or not out_name.strip():
                         errors.append(f"{label}: invalid output binding name {out_name!r}")
                     elif out_name != "_":
+                        _warn_if_shadowed(out_name, label)
                         known_keys.add(out_name)
 
         if errors:

@@ -166,7 +166,7 @@ def test_sub_pipeline_composition_via_callable() -> None:
 
 
 def test_custom_omegaconf_resolver_and_higher_order_builtin() -> None:
-    OmegaConf.register_new_resolver("add_one", lambda x: int(x) + 1, replace=True)
+    OmegaConf.register_resolver("add_one", lambda x: int(x) + 1, replace=True)
     pipe = Pipeline.from_dict(
         {
             "params": {"n": "${add_one:3}"},
@@ -179,6 +179,18 @@ def test_custom_omegaconf_resolver_and_higher_order_builtin() -> None:
     )
     res = pipe.run()
     assert res["strs"] == ["0", "1", "2", "3"]
+
+
+def test_single_discard_output() -> None:
+    pipe = Pipeline.from_dict(
+        {
+            "steps": [
+                {"fn": "abs", "args": [-5], "outputs": ["_"]},
+            ],
+        }
+    )
+    res = pipe.run()
+    assert res == {}
 
 
 def test_submodule_import_binds_top_level_package() -> None:

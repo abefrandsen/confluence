@@ -81,29 +81,31 @@ In `args` and `kwargs`, values are passed inline as literals unless prefixed wit
 - `$a.b.c` — traverse mapping keys (checked first) and object attributes
 - `$items[0]`, `$items[-1]`, `$cfg["my.key"]` — integer and quoted string indexing (quote bracketed paths inside YAML `[...]` flow lists, e.g. `args: ["$items[0]"]`)
 - `$$literal` — escape a literal string starting with `$` → `"$literal"`
-- Nested lists and dicts are resolved recursively.
+- Nested lists and dicts are resolved recursively (in dicts, only values are resolved; keys remain literals).
 
 A step's `fn` field is always a callable path and does **not** use `$` (e.g. `fn: math.sqrt`, `fn: scaler.transform`, `fn: model`).
 
 ### Scope Lookup Order
 When resolving a root name, Confluence searches in order:
 1. **`data`** — initial inputs and outputs bound by prior steps
-2. **`functions`** — callables/objects passed to `Pipeline(..., functions=...)`
+2. **`functions`** — callables/objects passed via `functions=...` to `Pipeline.from_yaml(...)`, `Pipeline.from_dict(...)`, or `Pipeline(config, functions=...)`
 3. **`imports`** — top-level packages loaded from `imports` (e.g. `torch.nn` binds `torch`)
-4. **`builtins`** — safe Python builtins (`len`, `sum`, `map`, `list`, etc.; dangerous builtins like `eval`, `exec`, `open`, `__import__` are excluded)
+4. **`builtins`** — standard Python builtins (`len`, `sum`, `map`, `list`, etc.; interactive and footgun builtins like `eval`, `exec`, `open`, and `__import__` are excluded by default)
+
+> **Trust model:** A Confluence YAML file can import arbitrary Python modules and invoke arbitrary callables. Treat pipeline configs as executable code and only run trusted YAML files—the excluded builtins list is a guardrail against mistakes, **not** a security sandbox.
 
 `pipeline.run(data)` shallow-copies the input dict and returns the resulting `data` dict without leaking `functions`, `imports`, or `builtins`.
 
 ### Output Binding
-- Omitted / `[]` — discard return value (for side-effecting steps)
+- Omitted, `[]`, or `["_"]` — discard return value (for side-effecting steps)
 - `[key]` — bind return value directly without unpacking (even if it is a tuple/list)
 - `[k1, k2, ...]` — unpack iterable of matching length; use `"_"` to discard an element
-- Overwriting existing keys in `data` is allowed.
+- Overwriting existing keys in `data` is allowed (shadowing a function, import, or builtin emits a `UserWarning` during validation).
 
 ### OmegaConf Integration
 - Put shared config values under `params:` and reference them with `${params.*}`.
 - Pass dotlist overrides via `Pipeline.from_yaml(..., overrides=["params.lr=0.01"])`.
-- Any custom resolvers registered via `OmegaConf.register_new_resolver(...)` work automatically.
+- Custom resolvers registered with OmegaConf (`OmegaConf.register_resolver(...)`) work inside `params`, `args`, and `kwargs` (typed fields like `fn` and `outputs` still require strings).
 
 ### Pre-flight Validation & Sub-pipelines
 - Call `pipeline.validate()` (optionally with `input_keys=[...]`) to verify imports, path syntax, dataflow references, and static callables before running. `run()` also validates automatically before step 0.

@@ -1,4 +1,8 @@
-"""Safe Python builtins scope for pipeline resolution."""
+"""Default Python builtins scope for pipeline resolution.
+
+Note: Excluding interactive/footgun builtins is a guardrail against accidental misuse,
+not a security boundary. Pipeline YAML must be treated as trusted code.
+"""
 
 from __future__ import annotations
 
@@ -28,8 +32,8 @@ EXCLUDED_BUILTINS: frozenset[str] = frozenset(
 )
 
 
-def get_safe_builtins() -> dict[str, Any]:
-    """Return a dict of safe Python builtins, excluding dangerous and dunder entries."""
+def get_default_builtins() -> dict[str, Any]:
+    """Return a dict of default Python builtins, excluding interactive/footgun and dunder entries."""
     return {
         name: obj
         for name, obj in vars(builtins).items()

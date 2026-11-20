@@ -9,7 +9,7 @@ description = "Config-driven YAML data pipeline runner for modular function comp
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "omegaconf>=2.3.0",
+    "omegaconf>=2.4.0",
 ]
 
 [dependency-groups]

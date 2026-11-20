@@ -22,7 +22,7 @@ from typing import Any, Optional
 
 @dataclass
 class StepConfig:
-    fn: str                                             # Path to callable (e.g. "numpy.mean", "scaler.fit_transform")
+    fn: str = ""                                        # Path to callable (e.g. "numpy.mean", "scaler.fit_transform")
     name: Optional[str] = None                          # Optional human-readable label for logs/errors
     args: list[Any] = field(default_factory=list)       # Positional arguments
     kwargs: dict[str, Any] = field(default_factory=dict)  # Keyword arguments
@@ -70,12 +70,12 @@ steps:
       x: $scaled_x
       y: $raw_y
       test_size: "${params.test_size}"
-    outputs: [x_train, x_val, x_test, "_"]  # "_" discards an unpacked value
+    outputs: [x_train, x_test, y_train, y_test]
 
-  - name: first_val_sample
-    fn: numpy.mean
-    args: ["$x_val[0]"]  # Indexing supported (quote bracketed paths inside YAML [...] flow lists)
-    outputs: [sample_mean]
+  - name: first_test_label
+    fn: int
+    args: ["$y_test[0]"]  # Indexing supported (quote bracketed paths inside YAML [...] flow lists)
+    outputs: [sample_label]
 ```
 
 ---
@@ -95,7 +95,7 @@ In `args` and `kwargs`, YAML primitives (`int`, `float`, `bool`, `None`, `str`) 
 | `$cfg["my.key"]` | Quoted string key lookup (useful for keys with dots/spaces) |
 | `$prep.batches[0].values[-1]` | Arbitrary chaining of dots and brackets |
 | `$$literal` | Escaped literal string `"$literal"` (leading `$$` unescapes to `$`) |
-| `[$x, 1, {k: $y.z}]` | Containers are resolved **recursively** |
+| `[$x, 1, {k: $y.z}]` | Containers are resolved **recursively** (in dicts, only **values** are resolved; keys are left as literals) |
 
 OmegaConf evaluates `${...}` interpolations first during config resolution (Phase 1). Plain `$name` references without braces are ignored by OmegaConf and resolved at runtime (Phase 3).
 
@@ -105,9 +105,9 @@ In a step's `fn` field, the value is always a path to a callable and does **not*
 When resolving the root segment of a path (e.g., `foo` in `foo.bar[0]`), scopes are searched in this order:
 
 1. **`data`** — the mutable runtime data dict (initial inputs + step outputs)
-2. **`functions`** — user-supplied callable/object dict passed at pipeline creation/execution
+2. **`functions`** — user-supplied callable/object dict passed at pipeline creation
 3. **`imports`** — top-level module bindings created from `imports`
-4. **`builtins`** — safe Python builtins
+4. **`builtins`** — default Python builtins (see Section 4.2)
 
 Keeping `data` separate from `functions`, `imports`, and `builtins` ensures that returning `data` at the end of execution returns only pipeline data, without polluting it with modules or builtins.
 
@@ -117,7 +117,7 @@ After resolving the root object `obj`, each subsequent segment is resolved in or
 - **Dot segment (`.part`):**
   1. Mapping key lookup (`obj[part]`) if `isinstance(obj, Mapping)` and `part in obj`
   2. Attribute lookup (`getattr(obj, part)`) if `hasattr(obj, part)`
-  3. Otherwise raise `ResolutionError` with step context and the failing segment.
+  3. Otherwise raise `ResolutionError` with step context and the failing segment. If `obj` is a Python module (`types.ModuleType`) and `<obj.__name__>.<part>` is a resolvable submodule spec (`importlib.util.find_spec`), the error includes a hint suggesting adding `<obj.__name__>.<part>` to `imports`.
 - **Bracket segment (`[idx]`):**
   - Supports integer indices (`[0]`, `[-1]`) and quoted string keys (`["key"]`, `['key']`).
   - Evaluates `obj[idx]`; wraps `KeyError`/`IndexError`/`TypeError` in `ResolutionError` with step context.
@@ -125,18 +125,20 @@ After resolving the root object `obj`, each subsequent segment is resolved in or
 
 ---
 
-## 4. Imports & Safe Builtins
+## 4. Imports & Builtins
 
 ### 4.1 Imports
 - Entries in `imports` are plain dotted module paths (e.g., `"numpy"`, `"torch.nn"`).
 - Each entry is loaded via `importlib.import_module(mod_path)` and the **top-level package** is bound in the `imports` scope (matching standard Python `import torch.nn` semantics, so `torch.nn.Linear` resolves naturally).
 - No aliasing or `from X import Y` in v1, keeping module references unambiguous.
 
-### 4.2 Builtins
-Python builtins are available by default in the lowest-precedence scope, **excluding** dangerous/interactive builtins:
+### 4.2 Builtins & Trust Model
+Python builtins are available by default in the lowest-precedence scope, excluding interactive and footgun builtins to keep the namespace clean and guard against accidental misuse:
 
-- **Excluded:** `eval`, `exec`, `compile`, `__import__`, `open`, `input`, `breakpoint`, `globals`, `locals`, `vars`, `exit`, `quit`, `help`, `copyright`, `credits`, `license`, `memoryview`
+- **Excluded by default:** `eval`, `exec`, `compile`, `__import__`, `open`, `input`, `breakpoint`, `globals`, `locals`, `vars`, `exit`, `quit`, `help`, `copyright`, `credits`, `license`, `memoryview`
 - **Included (examples):** `len`, `sum`, `min`, `max`, `abs`, `round`, `sorted`, `reversed`, `zip`, `enumerate`, `map`, `filter`, `range`, `list`, `dict`, `set`, `tuple`, `str`, `int`, `float`, `bool`, `getattr`, `setattr`, `hasattr`, `isinstance`, `type`, `all`, `any`, `print`, etc.
+
+> **Trust model:** Pipeline YAML is executable code (it can import arbitrary modules and traverse Python object attributes) and **must be trusted**. Confluence does not sandbox execution; excluding builtins above is a convenience guardrail against mistakes, not a security boundary.
 
 ---
 
@@ -146,7 +148,7 @@ Each step's `outputs` field (`list[str] | None`) controls how the return value `
 
 | `outputs` Value | Behavior |
 | --- | --- |
-| `None` or `[]` | Return value is discarded (for side-effecting steps). |
+| `None`, `[]`, or `["_"]` | Return value is discarded without writing to `data` (for side-effecting steps). |
 | `["key"]` (`len == 1`) | `data["key"] = result` directly — **never** unpacked, even if `result` is a tuple or list. |
 | `["k1", "k2", ...]` (`len > 1`) | Unpacks `result` as a sequence/iterable of exact length `len(outputs)` and binds each element (`data[k] = val`). Raises `OutputBindingError` on length mismatch or non-iterable result. |
 
@@ -166,52 +168,73 @@ Each step's `outputs` field (`list[str] | None`) controls how the return value `
 ### Phase 2 — Static Validation (Pre-flight)
 Before executing step 0, validate:
 1. **Schema & path syntax:** Every step has a non-empty, syntactically valid `fn` path; every `$ref` path parses cleanly; `outputs` names are non-empty strings.
-2. **Import resolution:** All declared `imports` load cleanly.
-3. **Simulated dataflow:**
+2. **Import resolution:** All declared `imports` load cleanly (loaded modules are cached on the `Pipeline` instance after the first successful load).
+3. **Simulated dataflow** (following the same `data` → `functions` → `imports` → `builtins` lookup order as execution):
    - Initialize `known_keys` from `data.keys()` (if validating with runtime data) and/or `cfg.inputs` (if declared). If both are provided, verify all declared `cfg.inputs` are present in `data`.
+   - Emit a `UserWarning` (once per key) whenever a declared input, runtime input, or step output key shadows a name in `functions`, `imports`, or `builtins`.
    - For each step:
      - Verify the root of `fn` and every `$ref` in `args`/`kwargs` exists in `known_keys | functions | imports | builtins`.
-     - If `fn` resolves to a static scope (`functions`, `imports`, `builtins`), verify the full path exists and is `callable(...)`.
+     - If `fn`'s root is **not** in `known_keys` (i.e. it resolves to a static scope: `functions`, `imports`, or `builtins`), verify the full path exists and is `callable(...)`.
      - Add all non-`"_"` output keys to `known_keys`.
 4. Collect and report **all** validation errors together with step index and step `name` (if set).
 
+Validation is **not** cached across `run()` calls—it reruns on every `run(data)` because caller-supplied `data.keys()` may differ between calls (while module imports remain cached).
+
 ### Phase 3 — Execution
 1. Shallow-copy the caller's initial `data` dict so the caller's input dict isn't unexpectedly mutated.
-2. For each step in `steps`:
+2. Automatically run `validate(input_keys=data.keys())` before executing step 0 (failing fast on missing inputs, bad paths, or invalid static callables).
+3. For each step in `steps`:
    - Resolve `fn` → callable.
    - Recursively resolve `args` and `kwargs`.
    - Invoke `result = fn(*resolved_args, **resolved_kwargs)`.
    - Bind `result` into `data` according to `outputs`.
    - On failure, wrap/annotate the error with step index, step `name`, and `fn` string.
-3. Return `data`.
+4. Return `data`.
 
 ---
 
-## 7. Python API Sketch
+## 7. Error Hierarchy
+
+All custom exceptions inherit from `ConfluenceError`:
+
+- `ConfluenceError` — base exception
+  - `PathSyntaxError` — malformed dotted/indexed path string
+  - `ResolutionError` — undefined root name, missing attribute/key, invalid index, or non-callable target
+  - `OutputBindingError` — non-iterable return value or length mismatch during multi-output unpacking
+  - `ValidationError` — pre-flight validation failure (`.errors: list[str]` holds all collected messages)
+  - `StepExecutionError` — runtime failure during step execution (`.step_index`, `.step_name`, `.fn`, `.cause`)
+
+---
+
+## 8. Python API Sketch
 
 ```python
+# Construct from YAML, a dict/DictConfig, or a PipelineConfig instance:
 pipeline = Pipeline.from_yaml(
     "train.yaml",
     functions={"split_data": split_data},
     overrides=["params.scale_factor=3.0"],
 )
+# Also available:
+# pipeline = Pipeline.from_dict(cfg_dict, functions=..., overrides=...)
+# pipeline = Pipeline(config=pipeline_cfg, functions=...)
 
 # Optional standalone validation before running
 pipeline.validate(input_keys=["raw_x", "raw_y"])
 
-# Execute (Pipeline is also callable)
+# Execute (validates automatically; Pipeline is also callable)
 result: dict[str, Any] = pipeline.run({"raw_x": x, "raw_y": y})
 # or: result = pipeline({"raw_x": x, "raw_y": y})
 ```
 
 ---
 
-## 8. Scope Boundaries (v1 vs. Future)
+## 9. Scope Boundaries (v1 vs. Future)
 
 | Feature | v1 Status | Notes |
 | --- | --- | --- |
 | Linear step execution | **In scope** | Core execution model |
-| Classes, methods, functions, safe builtins | **In scope** | Unified callable resolution |
+| Classes, methods, functions, default builtins | **In scope** | Unified callable resolution |
 | Dotted paths + integer/string indexing | **In scope** | `$a.b[0]["k"]` (no slices or nested expressions) |
 | Sub-pipelines via Python | **Free in v1** | Because `Pipeline` is callable, pass a `Pipeline` instance in `functions` |
 | Sub-pipelines declared in YAML | **Deferred (v2)** | Easy to add later without changing v1 syntax |

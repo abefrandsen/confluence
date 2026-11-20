@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import re
+import types
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -121,9 +123,17 @@ def resolve_parsed_path(
             elif hasattr(obj, seg.name):
                 obj = getattr(obj, seg.name)
             else:
+                hint = ""
+                if isinstance(obj, types.ModuleType) and getattr(obj, "__name__", None):
+                    candidate = f"{obj.__name__}.{seg.name}"
+                    try:
+                        if importlib.util.find_spec(candidate) is not None:
+                            hint = f" (did you mean to add {candidate!r} to imports?)"
+                    except (ImportError, ValueError):
+                        pass
                 raise ResolutionError(
                     f"Cannot resolve segment {seg.name!r} on {traversed!r} "
-                    f"(type {type(obj).__name__}) in path {parsed.raw!r}"
+                    f"(type {type(obj).__name__}) in path {parsed.raw!r}{hint}"
                 )
             traversed = f"{traversed}.{seg.name}"
         else:

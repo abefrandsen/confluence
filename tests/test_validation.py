@@ -81,3 +81,84 @@ def test_validate_rejects_excluded_builtins() -> None:
     )
     with pytest.raises(ValidationError, match="undefined name 'eval'"):
         pipe.validate()
+
+
+def test_validate_warns_on_shadowing_static_scopes_and_deduplicates() -> None:
+    pipe = Pipeline.from_dict(
+        {
+            "imports": ["math"],
+            "steps": [
+                {"fn": "abs", "args": [-1], "outputs": ["len"]},
+                {"fn": "abs", "args": [-2], "outputs": ["len"]},  # duplicate should not warn twice
+                {"fn": "abs", "args": [-3], "outputs": ["math"]},
+                {"fn": "abs", "args": [-4], "outputs": ["my_fn"]},
+            ],
+        },
+        functions={"my_fn": lambda x: x},
+    )
+    with pytest.warns(UserWarning) as record:
+        pipe.validate(input_keys=["sum"])  # undeclared runtime input shadowing builtin
+
+    messages = [str(w.message) for w in record]
+    assert len([m for m in messages if "'len' shadows" in m]) == 1
+    assert any("'sum' shadows a name in builtins" in m for m in messages)
+    assert any("'math' shadows a name in imports" in m for m in messages)
+    assert any("'my_fn' shadows a name in functions" in m for m in messages)
+
+
+def test_validate_hints_only_for_real_missing_submodules() -> None:
+    # Real submodule that isn't imported when only `xml` is imported
+    pipe_real = Pipeline.from_dict(
+        {
+            "imports": ["xml"],
+            "steps": [{"fn": "xml.dom.getDOMImplementation", "args": []}],
+        }
+    )
+    with pytest.raises(
+        ValidationError,
+        match="did you mean to add 'xml.dom' to imports",
+    ):
+        pipe_real.validate()
+
+    # Typo on a module should NOT trigger the submodule hint
+    pipe_typo = Pipeline.from_dict(
+        {
+            "imports": ["math"],
+            "steps": [{"fn": "math.sqroot", "args": [4]}],
+        }
+    )
+    with pytest.raises(ValidationError) as exc_info:
+        pipe_typo.validate()
+    assert "did you mean to add" not in str(exc_info.value)
+
+
+def test_validate_keeps_successful_imports_when_another_import_fails() -> None:
+    pipe = Pipeline.from_dict(
+        {
+            "imports": ["math", "definitely_not_a_real_module_xyz"],
+            "steps": [{"fn": "math.sqrt", "args": [4], "outputs": ["r"]}],
+        }
+    )
+    with pytest.raises(ValidationError) as exc_info:
+        pipe.validate()
+
+    assert len(exc_info.value.errors) == 1
+    assert "definitely_not_a_real_module_xyz" in exc_info.value.errors[0]
+
+
+def test_validate_respects_data_precedence_over_static_scope() -> None:
+    # Step 0 binds `math` in data (shadowing the imported `math` module with a custom callable);
+    # Step 1 calls `math.custom_method`, which must NOT fail static validation against the module.
+    pipe = Pipeline.from_dict(
+        {
+            "imports": ["math"],
+            "inputs": ["obj"],
+            "steps": [
+                {"fn": "identity", "args": ["$obj"], "outputs": ["math"]},
+                {"fn": "math.custom_method", "outputs": ["res"]},
+            ],
+        },
+        functions={"identity": lambda x: x},
+    )
+    with pytest.warns(UserWarning, match="'math' shadows a name in imports"):
+        pipe.validate()
