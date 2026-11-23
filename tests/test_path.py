@@ -9,9 +9,12 @@ import pytest
 from confluence.errors import PathSyntaxError, ResolutionError
 from confluence.path import (
     AttrSegment,
+    CompiledRef,
     IndexSegment,
-    collect_references,
+    InvalidRef,
+    compile_value,
     parse_path,
+    resolve_compiled_value,
     resolve_path,
     resolve_value,
 )
@@ -112,6 +115,21 @@ def test_resolve_value_literals_refs_escaping_and_containers() -> None:
     ]
 
 
-def test_collect_references_ignores_escaped() -> None:
-    refs = collect_references(["$a.b", "$$literal", {"k": "$c[0]", "n": 5}])
-    assert refs == ["a.b", "c[0]"]
+def test_compile_and_resolve_compiled_value() -> None:
+    refs: list[CompiledRef | InvalidRef] = []
+    compiled = compile_value(["$x", 1, {"k": "$y.z", "esc": "$$x", "bad": "$a..b"}], refs)
+
+    assert isinstance(compiled[0], CompiledRef)
+    assert compiled[2]["esc"] == "$x"
+    assert isinstance(compiled[2]["bad"], InvalidRef)
+    assert len(refs) == 3
+    assert isinstance(refs[0], CompiledRef)
+    assert isinstance(refs[1], CompiledRef)
+    assert isinstance(refs[2], InvalidRef)
+
+    valid_compiled = compile_value(["$x", 1, {"k": "$y.z", "esc": "$$x"}])
+    scopes = [{"x": 10, "y": {"z": 20}}]
+    assert resolve_compiled_value(valid_compiled, scopes) == [10, 1, {"k": 20, "esc": "$x"}]
+
+    with pytest.raises(PathSyntaxError):
+        resolve_compiled_value(compiled, scopes)

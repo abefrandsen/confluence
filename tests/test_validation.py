@@ -162,3 +162,74 @@ def test_validate_respects_data_precedence_over_static_scope() -> None:
     )
     with pytest.warns(UserWarning, match="'math' shadows a name in imports"):
         pipe.validate()
+
+
+@pytest.mark.parametrize("bad_name", ["my-key", "123abc", "a.b", "has space", ""])
+def test_validate_rejects_non_identifier_inputs_and_outputs(bad_name: str) -> None:
+    pipe_in = Pipeline.from_dict(
+        {
+            "inputs": [bad_name],
+            "steps": [{"fn": "abs", "args": [-1], "outputs": ["ok"]}],
+        }
+    )
+    with pytest.raises(ValidationError, match="invalid input name"):
+        pipe_in.validate()
+
+    pipe_out = Pipeline.from_dict(
+        {
+            "steps": [{"fn": "abs", "args": [-1], "outputs": [bad_name]}],
+        }
+    )
+    with pytest.raises(ValidationError, match="invalid output binding name"):
+        pipe_out.validate()
+
+
+def test_validate_rejects_duplicate_inputs_and_step_outputs_but_allows_multiple_discards() -> None:
+    pipe_dup_in = Pipeline.from_dict(
+        {
+            "inputs": ["x", "x"],
+            "steps": [{"fn": "abs", "args": ["$x"], "outputs": ["y"]}],
+        }
+    )
+    with pytest.raises(ValidationError, match="duplicate input name 'x'"):
+        pipe_dup_in.validate()
+
+    pipe_dup_out = Pipeline.from_dict(
+        {
+            "steps": [{"fn": "range", "args": [2], "outputs": ["a", "a"]}],
+        }
+    )
+    with pytest.raises(ValidationError, match="duplicate output binding name 'a'"):
+        pipe_dup_out.validate()
+
+    # Multiple "_" discards in the same step remain valid
+    pipe_multi_discard = Pipeline.from_dict(
+        {
+            "steps": [{"fn": "range", "args": [3], "outputs": ["_", "_", "last"]}],
+        }
+    )
+    pipe_multi_discard.validate()
+
+
+def test_validate_resolves_full_static_argument_refs() -> None:
+    pipe = Pipeline.from_dict(
+        {
+            "imports": ["math"],
+            "steps": [
+                {"fn": "list", "args": [["$math.nope"]], "outputs": ["out"]},
+            ],
+        }
+    )
+    with pytest.raises(ValidationError, match="Cannot resolve segment 'nope'"):
+        pipe.validate()
+
+    # Valid static ref passes
+    pipe_ok = Pipeline.from_dict(
+        {
+            "imports": ["math"],
+            "steps": [
+                {"fn": "abs", "args": ["$math.pi"], "outputs": ["out"]},
+            ],
+        }
+    )
+    pipe_ok.validate()

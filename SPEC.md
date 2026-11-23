@@ -150,7 +150,7 @@ Each step's `outputs` field (`list[str] | None`) controls how the return value `
 | --- | --- |
 | `None`, `[]`, or `["_"]` | Return value is discarded without writing to `data` (for side-effecting steps). |
 | `["key"]` (`len == 1`) | `data["key"] = result` directly — **never** unpacked, even if `result` is a tuple or list. |
-| `["k1", "k2", ...]` (`len > 1`) | Unpacks `result` as a sequence/iterable of exact length `len(outputs)` and binds each element (`data[k] = val`). Raises `OutputBindingError` on length mismatch or non-iterable result. |
+| `["k1", "k2", ...]` (`len > 1`) | Unpacks `result` as a sequence/iterable of exact length `len(outputs)` and binds each element (`data[k] = val`). Rejects `str`, `bytes`, and `Mapping` values (bind a single output key for a mapping and access keys via `$out.key`), and raises `OutputBindingError` on length mismatch or non-unpackable result. |
 
 - **Discard placeholder:** Binding to `"_"` discards that value without writing to `data`.
 - **Overwriting:** Writing to an existing key in `data` is allowed and overwrites the previous value.
@@ -167,7 +167,7 @@ Each step's `outputs` field (`list[str] | None`) controls how the return value `
 
 ### Phase 2 — Static Validation (Pre-flight)
 Before executing step 0, validate:
-1. **Schema & path syntax:** Every step has a non-empty, syntactically valid `fn` path; every `$ref` path parses cleanly; `outputs` names are non-empty strings.
+1. **Schema & path syntax:** Every step has a non-empty, syntactically valid `fn` path; every `$ref` path parses cleanly; declared `inputs` and step `outputs` names are valid identifiers (`[A-Za-z_][A-Za-z0-9_]*`).
 2. **Import resolution:** All declared `imports` load cleanly (loaded modules are cached on the `Pipeline` instance after the first successful load).
 3. **Simulated dataflow** (following the same `data` → `functions` → `imports` → `builtins` lookup order as execution):
    - Initialize `known_keys` from `data.keys()` (if validating with runtime data) and/or `cfg.inputs` (if declared). If both are provided, verify all declared `cfg.inputs` are present in `data`.
@@ -175,20 +175,21 @@ Before executing step 0, validate:
    - For each step:
      - Verify the root of `fn` and every `$ref` in `args`/`kwargs` exists in `known_keys | functions | imports | builtins`.
      - If `fn`'s root is **not** in `known_keys` (i.e. it resolves to a static scope: `functions`, `imports`, or `builtins`), verify the full path exists and is `callable(...)`.
+     - Similarly, for any `$ref` whose root is **not** in `known_keys` (resolving to a static scope), verify the full path resolves cleanly.
      - Add all non-`"_"` output keys to `known_keys`.
 4. Collect and report **all** validation errors together with step index and step `name` (if set).
 
-Validation is **not** cached across `run()` calls—it reruns on every `run(data)` because caller-supplied `data.keys()` may differ between calls (while module imports remain cached).
+Validation is **not** cached across `run()` calls—it reruns on every `run(data)` by default because caller-supplied `data.keys()` may differ between calls (while module imports and parsed `fn`/`$ref` paths are cached on the `Pipeline` instance). For repeated hot-loop invocations with a known input schema, callers may validate once up front and pass `validate=False` to `run(data, validate=False)` (imports are still loaded once if not already loaded).
 
 ### Phase 3 — Execution
 1. Shallow-copy the caller's initial `data` dict so the caller's input dict isn't unexpectedly mutated.
-2. Automatically run `validate(input_keys=data.keys())` before executing step 0 (failing fast on missing inputs, bad paths, or invalid static callables).
-3. For each step in `steps`:
-   - Resolve `fn` → callable.
-   - Recursively resolve `args` and `kwargs`.
+2. When `validate=True` (the default), automatically run `validate(input_keys=data.keys())` before executing step 0 (failing fast on missing inputs, bad paths, or invalid static callables). When `validate=False`, ensure declared `imports` are loaded (once) and skip static validation.
+3. For each pre-compiled step in `steps`:
+   - Resolve pre-parsed `fn` → callable.
+   - Recursively resolve pre-parsed `args` and `kwargs`.
    - Invoke `result = fn(*resolved_args, **resolved_kwargs)`.
    - Bind `result` into `data` according to `outputs`.
-   - On failure, wrap/annotate the error with step index, step `name`, and `fn` string.
+   - On failure, annotate the exception with step index, step `name`, and `fn` string via `exc.add_note(...)` and re-raise the original exception so callers can catch specific exception types directly (e.g. `torch.cuda.OutOfMemoryError`).
 4. Return `data`.
 
 ---
@@ -202,7 +203,8 @@ All custom exceptions inherit from `ConfluenceError`:
   - `ResolutionError` — undefined root name, missing attribute/key, invalid index, or non-callable target
   - `OutputBindingError` — non-iterable return value or length mismatch during multi-output unpacking
   - `ValidationError` — pre-flight validation failure (`.errors: list[str]` holds all collected messages)
-  - `StepExecutionError` — runtime failure during step execution (`.step_index`, `.step_name`, `.fn`, `.cause`)
+
+Runtime exceptions raised during step execution are re-raised directly with step context attached via `BaseException.add_note()`.
 
 ---
 
@@ -225,6 +227,8 @@ pipeline.validate(input_keys=["raw_x", "raw_y"])
 # Execute (validates automatically; Pipeline is also callable)
 result: dict[str, Any] = pipeline.run({"raw_x": x, "raw_y": y})
 # or: result = pipeline({"raw_x": x, "raw_y": y})
+# or for hot inner loops after validate():
+# result = pipeline.run({"raw_x": x, "raw_y": y}, validate=False)
 ```
 
 ---
@@ -240,3 +244,49 @@ result: dict[str, Any] = pipeline.run({"raw_x": x, "raw_y": y})
 | Sub-pipelines declared in YAML | **Deferred (v2)** | Easy to add later without changing v1 syntax |
 | Control flow (`if`, `for`, `map`) | **Out of scope** | Implement in Python functions |
 | Import aliases (`numpy as np`) | **Deferred (v2)** | Plain imports only in v1 |
+
+---
+
+## 10. Optional PyTorch Extension (`confluence.torch`)
+
+`confluence.torch` is an optional subpackage (`pip install "confluence[torch]"`) that keeps core `confluence` free of any `torch` dependency while providing a config-driven `nn.Module` container (`DictModule`).
+
+### 10.1 Structured Config Schema
+```python
+@dataclass
+class ComponentConfig:
+    type: str = ""                                     # Registry name, imported symbol, or dotted import path
+    args: list[Any] = field(default_factory=list)      # Positional args (supports $ref to earlier components)
+    params: dict[str, Any] = field(default_factory=dict)  # Keyword args (supports $ref to earlier components)
+    compile: Any = False                               # False/None, True, or dict of torch.compile(**kwargs)
+    freeze: bool = False                               # If True, sets requires_grad_(False) on parameters
+
+@dataclass
+class ForwardConfig:
+    inputs: list[str] = field(default_factory=list)    # Declared forward input names
+    steps: list[StepConfig] = field(default_factory=list)
+
+@dataclass
+class DictModuleConfig:
+    imports: list[str] = field(default_factory=list)   # Shared by both `components` and `forward`
+    params: dict[str, Any] = field(default_factory=dict)  # Shared `${params.*}` interpolations
+    components: dict[str, ComponentConfig] = field(default_factory=dict)
+    forward: ForwardConfig = field(default_factory=ForwardConfig)
+    outputs: Optional[list[str]] = None                # None -> full state dict, [k] -> state[k], [k1, ...] -> subset dict
+```
+
+### 10.2 Pre-flight Validation & Two-Pass Construction
+1. **Pre-flight validation** (before instantiating any `nn.Module`): collects all errors into a single `ValidationError`, checking:
+   - `imports` load cleanly.
+   - All `components` keys are valid identifiers (`[A-Za-z_][A-Za-z0-9_]*`) and do not collide with passed `functions`.
+   - Each `type` resolves to a callable via `registry` → `imports` → dotted `importlib` lookup (preserving `ModuleNotFoundError` from missing transitive dependencies inside user modules rather than masking them).
+   - All `$ref`s in `args` and `params` parse cleanly, reference earlier components or static scopes (`registry | imports | builtins`), and resolve fully when targeting static scopes.
+   - `compile` is `bool`, `None`, or a `Mapping`.
+2. **Pass 1 (ordered instantiation):** Instantiates components in declaration order (`cls(*args, **params)`), attaching `While building component '<name>' [type='<type>']` via `exc.add_note(...)` on failure. Verifies each result is an `nn.Module`, applies `freeze` (`requires_grad_(False)` only; `model.train()` still toggles train/eval mode), and registers the **raw unwrapped** modules in `self.components` (`nn.ModuleDict`). Note: because every entry in `components` is registered in `self.components`, passing an earlier `nn.Module` instance into a later component (e.g. `torch.nn.Sequential`) will register shared weights under both keys in `state_dict()` (aliasing tensors, which breaks serializers like `safetensors`); referencing scalar attributes (e.g. `$embedder.out_dim`) has no aliasing issue.
+3. **Forward wiring & validation:** Constructs `self.forward_pipe` with top-level `imports`, `forward.inputs`, `forward.steps`, and `{**functions, **self.components}`, validates it once, and verifies any declared `outputs` keys are produced by `forward.inputs` or `forward.steps`.
+4. **Pass 2 (compilation):** Wraps configured components with `torch.compile(...)` **only inside `self.forward_pipe.functions`**, leaving `self.components` unwrapped so `state_dict()` keys never acquire `_orig_mod.` prefixes. `__getstate__` / `__setstate__` strip compiled wrappers before pickling/deepcopying and re-apply them on restore.
+
+### 10.3 Forward Calling Rules & Outputs
+- **`forward(*args, **kwargs)`:** Standard Python positional/keyword binding against `forward.inputs` (positional arguments always bind in order, even when an argument is a `dict`). Raises `TypeError` on unexpected keyword arguments, duplicate bindings, too many positional arguments, or missing required inputs.
+- **`forward_dict(batch)`:** Explicit helper for passing a batch `Mapping` (ignores extra unused keys such as labels, while still raising `TypeError` on missing required inputs).
+- **Execution & return value:** Runs `self.forward_pipe.run(inputs, validate=False)`. Returns the full `state` dict when `outputs` is `None`, `state[k]` when `len(outputs) == 1`, or `{k: state[k] for k in outputs}` when `len(outputs) > 1`.

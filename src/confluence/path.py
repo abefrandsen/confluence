@@ -18,6 +18,11 @@ _INT_BRACKET_RE = re.compile(r"\[(-?[0-9]+)\]")
 _STR_BRACKET_RE = re.compile(r"""\[("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')\]""")
 
 
+def is_valid_identifier(name: Any) -> bool:
+    """Return True if `name` is a valid Confluence root identifier (`[A-Za-z_][A-Za-z0-9_]*`)."""
+    return isinstance(name, str) and _IDENT_RE.fullmatch(name) is not None
+
+
 @dataclass(frozen=True)
 class AttrSegment:
     """A dotted segment such as `.foo`."""
@@ -42,6 +47,21 @@ class ParsedPath:
     raw: str
     root: str
     segments: tuple[Segment, ...]
+
+
+@dataclass(frozen=True)
+class CompiledRef:
+    """A pre-parsed `$ref` inside a compiled argument template."""
+
+    parsed: ParsedPath
+
+
+@dataclass(frozen=True)
+class InvalidRef:
+    """A syntactically invalid `$ref` captured during compilation for deferred reporting."""
+
+    raw: str
+    error: PathSyntaxError
 
 
 def parse_path(path: str) -> ParsedPath:
@@ -156,31 +176,47 @@ def resolve_path(path: str, scopes: Sequence[Mapping[str, Any]]) -> Any:
 
 def resolve_value(value: Any, scopes: Sequence[Mapping[str, Any]]) -> Any:
     """Recursively resolve `$`-prefixed references in arguments and containers."""
+    return resolve_compiled_value(compile_value(value), scopes)
+
+
+def compile_value(
+    value: Any,
+    refs_out: list[CompiledRef | InvalidRef] | None = None,
+) -> Any:
+    """Pre-parse `$`-prefixed references and unescape `$$` literals in argument templates."""
     if isinstance(value, str):
         if value.startswith("$$"):
             return value[1:]
         if value.startswith("$"):
-            return resolve_path(value[1:], scopes)
+            raw = value[1:]
+            ref: CompiledRef | InvalidRef
+            try:
+                ref = CompiledRef(parse_path(raw))
+            except PathSyntaxError as exc:
+                ref = InvalidRef(raw=raw, error=exc)
+            if refs_out is not None:
+                refs_out.append(ref)
+            return ref
         return value
     if isinstance(value, list):
-        return [resolve_value(item, scopes) for item in value]
+        return [compile_value(item, refs_out) for item in value]
     if isinstance(value, tuple):
-        return tuple(resolve_value(item, scopes) for item in value)
+        return tuple(compile_value(item, refs_out) for item in value)
     if isinstance(value, dict):
-        return {k: resolve_value(v, scopes) for k, v in value.items()}
+        return {k: compile_value(v, refs_out) for k, v in value.items()}
     return value
 
 
-def collect_references(value: Any) -> list[str]:
-    """Recursively collect all raw `$ref` path strings (without leading `$`) in a value."""
-    refs: list[str] = []
-    if isinstance(value, str):
-        if value.startswith("$") and not value.startswith("$$"):
-            refs.append(value[1:])
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            refs.extend(collect_references(item))
-    elif isinstance(value, dict):
-        for v in value.values():
-            refs.extend(collect_references(v))
-    return refs
+def resolve_compiled_value(value: Any, scopes: Sequence[Mapping[str, Any]]) -> Any:
+    """Resolve a value tree previously compiled by `compile_value`."""
+    if isinstance(value, CompiledRef):
+        return resolve_parsed_path(value.parsed, scopes)
+    if isinstance(value, InvalidRef):
+        raise value.error
+    if isinstance(value, list):
+        return [resolve_compiled_value(item, scopes) for item in value]
+    if isinstance(value, tuple):
+        return tuple(resolve_compiled_value(item, scopes) for item in value)
+    if isinstance(value, dict):
+        return {k: resolve_compiled_value(v, scopes) for k, v in value.items()}
+    return value

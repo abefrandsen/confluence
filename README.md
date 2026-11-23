@@ -108,8 +108,54 @@ When resolving a root name, Confluence searches in order:
 - Custom resolvers registered with OmegaConf (`OmegaConf.register_resolver(...)`) work inside `params`, `args`, and `kwargs` (typed fields like `fn` and `outputs` still require strings).
 
 ### Pre-flight Validation & Sub-pipelines
-- Call `pipeline.validate()` (optionally with `input_keys=[...]`) to verify imports, path syntax, dataflow references, and static callables before running. `run()` also validates automatically before step 0.
+- Call `pipeline.validate()` (optionally with `input_keys=[...]`) to verify imports, path syntax, dataflow references, and static callables before running. `run()` validates automatically before step 0 by default; for hot inner loops, validate once up front and call `pipeline.run(data, validate=False)` (step `fn` and `$ref` paths are pre-parsed once at `Pipeline` construction time).
 - `Pipeline` instances are callable (`pipeline(data)`), so you can compose sub-pipelines by passing a `Pipeline` in `functions`.
+
+### Optional PyTorch Utilities (`confluence.torch`)
+Install with the optional `torch` extra (`pip install -e ".[torch]"` or `uv sync --extra torch`) to use `DictModule`, a config-driven `nn.Module` backed by an ordered `nn.ModuleDict` and a Confluence `forward` pipeline (see [src/confluence/torch/README.md](src/confluence/torch/README.md) for the full config reference):
+
+```yaml
+params:
+  in_dim: 8
+  hidden_dim: 32
+  num_classes: 3
+
+components:
+  embedder:
+    type: BoardEmbedder
+    params:
+      in_dim: "${params.in_dim}"
+      hidden_dim: "${params.hidden_dim}"
+    compile: true
+  head:
+    type: torch.nn.Linear
+    params:
+      in_features: $embedder.out_dim   # references earlier component attribute
+      out_features: "${params.num_classes}"
+
+forward:
+  inputs: [x]
+  steps:
+    - fn: embedder
+      args: [$x]
+      outputs: [h]
+    - fn: head
+      args: [$h]
+      outputs: [logits]
+
+outputs: [logits]
+```
+
+```python
+from confluence.torch import DictModule
+
+model = DictModule.from_yaml(
+    "model.yaml",
+    registry={"BoardEmbedder": BoardEmbedder},
+    overrides=["params.hidden_dim=64", "components.embedder.compile=false"],
+)
+logits = model(x)  # positional/kwargs, or model.forward_dict({"x": tensor, ...})
+```
 
 ## Development
 

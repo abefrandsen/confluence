@@ -12,6 +12,11 @@ dependencies = [
     "omegaconf>=2.4.0",
 ]
 
+[project.optional-dependencies]
+torch = [
+    "torch>=2.0",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",

@@ -28,6 +28,20 @@ class PipelineConfig:
     steps: list[StepConfig] = field(default_factory=list)
 
 
+def build_step_configs(raw_steps: Optional[Sequence[dict[str, Any]]]) -> list[StepConfig]:
+    """Convert raw resolved step dicts into `StepConfig` instances."""
+    return [
+        StepConfig(
+            fn=step["fn"],
+            name=step.get("name"),
+            args=list(step.get("args") or []),
+            kwargs=dict(step.get("kwargs") or {}),
+            outputs=list(step["outputs"]) if step.get("outputs") is not None else None,
+        )
+        for step in (raw_steps or [])
+    ]
+
+
 def resolve_pipeline_config(
     raw_cfg: Union[DictConfig, dict[str, Any], PipelineConfig],
     overrides: Optional[Sequence[str]] = None,
@@ -46,22 +60,11 @@ def resolve_pipeline_config(
     container = OmegaConf.to_container(merged, resolve=True, throw_on_missing=True)
     assert isinstance(container, dict)
 
-    steps = [
-        StepConfig(
-            fn=step["fn"],
-            name=step.get("name"),
-            args=list(step.get("args") or []),
-            kwargs=dict(step.get("kwargs") or {}),
-            outputs=list(step["outputs"]) if step.get("outputs") is not None else None,
-        )
-        for step in (container.get("steps") or [])
-    ]
-
     return PipelineConfig(
         imports=list(container.get("imports") or []),
         inputs=list(container["inputs"]) if container.get("inputs") is not None else None,
         params=dict(container.get("params") or {}),
-        steps=steps,
+        steps=build_step_configs(container.get("steps")),
     )
 
 
