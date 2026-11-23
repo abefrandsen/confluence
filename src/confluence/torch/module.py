@@ -341,25 +341,16 @@ class DictModule(nn.Module):
         config = resolve_dict_module_config(raw, overrides=overrides)
         return cls(config=config, registry=registry, functions=functions)
 
-    def _run_forward(self, inputs: Mapping[str, Any]) -> Any:
-        if not self._input_set.issubset(inputs):
-            missing = [k for k in self._input_names if k not in inputs]
-            raise TypeError(f"DictModule.forward() missing required input(s): {missing}")
-
-        state = self.forward_pipe.run(inputs, validate=False)
-        if self.output_keys is None:
-            return state
-        if len(self.output_keys) == 1:
-            return state[self.output_keys[0]]
-        return {k: state[k] for k in self.output_keys}
-
     def forward_dict(self, batch: Mapping[str, Any]) -> Any:
-        """Execute the forward pipeline using a batch mapping (extra unused keys are ignored)."""
+        """Execute the module via `__call__` using a batch mapping (extra unused keys are ignored)."""
         if not isinstance(batch, Mapping):
             raise TypeError(
                 f"DictModule.forward_dict() expects a mapping, got {type(batch).__name__}"
             )
-        return self._run_forward(batch)
+        if not self._input_set.issubset(batch):
+            missing = [k for k in self._input_names if k not in batch]
+            raise TypeError(f"DictModule.forward() missing required input(s): {missing}")
+        return self(**{k: batch[k] for k in self._input_names})
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         """Execute the configured forward pipeline with standard Python positional/keyword binding.
@@ -386,4 +377,13 @@ class DictModule(nn.Module):
             merged.update(kwargs)
             inputs = merged
 
-        return self._run_forward(inputs)
+        if not self._input_set.issubset(inputs):
+            missing = [k for k in self._input_names if k not in inputs]
+            raise TypeError(f"DictModule.forward() missing required input(s): {missing}")
+
+        state = self.forward_pipe.run(inputs, validate=False)
+        if self.output_keys is None:
+            return state
+        if len(self.output_keys) == 1:
+            return state[self.output_keys[0]]
+        return {k: state[k] for k in self.output_keys}

@@ -302,9 +302,10 @@ def test_dict_module_validation_and_error_handling(
         },
     }
 
-    # outputs=None -> returns full state dict
+    # outputs=None -> returns full state dict (forward_dict does not leak unused batch keys)
     m_all = DictModule.from_dict(base_cfg)
     assert m_all(x=3) == {"x": 3, "y": 11}
+    assert m_all.forward_dict({"x": 3, "label": 99}) == {"x": 3, "y": 11}
 
     # multi-output -> returns subset dict
     m_multi = DictModule.from_dict({**base_cfg, "outputs": ["x", "y"]})
@@ -588,6 +589,21 @@ def test_dict_module_with_real_pytorch() -> None:
     # deepcopy and torch.save/torch.load work cleanly with imports + compiled component
     copied = copy.deepcopy(model)
     assert torch.allclose(copied(x), model(x))
+
+    # forward_dict dispatches through nn.Module.__call__ so forward hooks fire
+    hook_fired = False
+
+    def _hook(_mod: Any, _inp: Any, _out: Any) -> None:
+        nonlocal hook_fired
+        hook_fired = True
+
+    handle = model.register_forward_hook(_hook)
+    try:
+        out_dict = model.forward_dict({"x": x, "unused_label": torch.zeros(3)})
+        assert hook_fired
+        assert torch.allclose(out_dict, model(x))
+    finally:
+        handle.remove()
 
     import io
 
