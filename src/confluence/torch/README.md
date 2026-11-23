@@ -69,11 +69,15 @@ Load and run it from Python:
 
 ```python
 import torch
-from confluence.torch import DictModule
+import torch.nn as nn
+from confluence.torch import DictModule, register_component
+
+@register_component
+class BoardEmbedder(nn.Module):
+    ...
 
 model = DictModule.from_yaml(
     "model.yaml",
-    registry={"BoardEmbedder": BoardEmbedder},
     overrides=[
         "params.hidden_dim=64",
         "components.embedder.compile=false",
@@ -85,6 +89,8 @@ logits = model(x)                       # positional (binds to `forward.inputs` 
 logits = model(x=x)                     # keyword arguments
 logits = model.forward_dict({"x": x, "label": 0})  # unpack a batch mapping (ignores extra keys)
 ```
+
+You can also pass a custom name (`@register_component("embedder")`), overwrite an existing registration (`@register_component(replace=True)`), or pass an explicit `registry={"BoardEmbedder": BoardEmbedder}` to `DictModule.from_yaml(...)` (explicit `registry` entries take precedence over the global registry). If a decorated class lives in another module, listing that module in top-level `imports:` ensures the decorator runs before components are resolved.
 
 ## Config Structure
 

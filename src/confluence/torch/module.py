@@ -28,6 +28,7 @@ from confluence.torch.config import (
     load_dict_module_config,
     resolve_dict_module_config,
 )
+from confluence.torch.registry import get_component_registry
 
 try:
     import torch
@@ -110,9 +111,13 @@ class DictModule(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
-        reg = dict(registry) if registry else {}
         extra_functions = dict(functions) if functions else {}
+        # Load `imports` before reading the global registry so `@register_component`
+        # decorators inside imported modules are visible during type resolution.
         loaded_imports, errors = load_imports(config.imports)
+        reg = get_component_registry()
+        if registry:
+            reg.update(registry)
         builtins_scope = get_default_builtins()
         static_scopes = (reg, loaded_imports, builtins_scope)
         static_names = set(reg) | set(loaded_imports) | set(builtins_scope)

@@ -18,8 +18,12 @@ from confluence.torch import (
     ComponentConfig,
     DictModuleConfig,
     ForwardConfig,
+    clear_component_registry,
+    get_component_registry,
     load_dict_module_config,
+    register_component,
     resolve_dict_module_config,
+    unregister_component,
 )
 
 
@@ -626,3 +630,117 @@ def test_dict_module_with_real_pytorch() -> None:
                 "forward": {"steps": []},
             }
         )
+
+
+def test_register_component_decorator_and_helpers() -> None:
+    clear_component_registry()
+    try:
+        @register_component
+        class Alpha:
+            pass
+
+        @register_component("beta_alias")
+        class Beta:
+            pass
+
+        assert get_component_registry() == {"Alpha": Alpha, "beta_alias": Beta}
+        # Idempotent re-registration of the same class is allowed
+        assert register_component(Alpha) is Alpha
+
+        # Duplicate name with a different class raises ValueError unless replace=True
+        with pytest.raises(ValueError, match="already registered"):
+            @register_component("Alpha")
+            class OtherAlpha:
+                pass
+
+        @register_component("Alpha", replace=True)
+        class ReplacedAlpha:
+            pass
+
+        assert get_component_registry()["Alpha"] is ReplacedAlpha
+
+        # Invalid names, non-callables, and conflicting args fail cleanly
+        with pytest.raises(ValueError, match="Invalid component registry name"):
+            register_component("bad-name")(Alpha)
+        with pytest.raises(TypeError, match="must be callable"):
+            register_component(123)  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="Cannot pass both"):
+            register_component("a", name="b")
+
+        unregister_component("beta_alias")
+        assert "beta_alias" not in get_component_registry()
+    finally:
+        clear_component_registry()
+
+
+def test_dict_module_uses_registered_components_and_import_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_torch: tuple[Any, list[tuple[Any, dict[str, Any]]]],
+) -> None:
+    torch_mod, _ = fake_torch
+    DictModule = torch_mod.DictModule
+    FakeModule = sys.modules["torch.nn"].Module
+
+    # Module that registers a component via @register_component when imported via `imports:`
+    plugin_mod = tmp_path / "my_registered_blocks.py"
+    plugin_mod.write_text(
+        """
+import torch.nn as nn
+from confluence.torch import register_component
+
+@register_component
+class ScaleBlock(nn.Module):
+    def __init__(self, factor: int = 2) -> None:
+        super().__init__()
+        self.factor = factor
+
+    def forward(self, x: float) -> float:
+        return x * self.factor
+"""
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    clear_component_registry()
+    try:
+        model = DictModule.from_dict(
+            {
+                "imports": ["my_registered_blocks"],
+                "components": {
+                    "scaler": {"type": "ScaleBlock", "params": {"factor": 5}},
+                },
+                "forward": {
+                    "inputs": ["x"],
+                    "steps": [{"fn": "scaler", "args": ["$x"], "outputs": ["y"]}],
+                },
+                "outputs": ["y"],
+            }
+        )
+        assert model(3) == 15
+
+        # Explicit `registry` takes precedence over the global registry
+        class OverrideBlock(FakeModule):
+            def __init__(self, factor: int = 1) -> None:
+                super().__init__()
+                self.factor = factor
+
+            def forward(self, x: float) -> float:
+                return x + self.factor
+
+        model_override = DictModule.from_dict(
+            {
+                "components": {
+                    "scaler": {"type": "ScaleBlock", "params": {"factor": 5}},
+                },
+                "forward": {
+                    "inputs": ["x"],
+                    "steps": [{"fn": "scaler", "args": ["$x"], "outputs": ["y"]}],
+                },
+                "outputs": ["y"],
+            },
+            registry={"ScaleBlock": OverrideBlock},
+        )
+        assert model_override(3) == 8
+    finally:
+        clear_component_registry()
+        sys.modules.pop("my_registered_blocks", None)

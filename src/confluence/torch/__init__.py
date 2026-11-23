@@ -11,6 +11,12 @@ from confluence.torch.config import (
     load_dict_module_config,
     resolve_dict_module_config,
 )
+from confluence.torch.registry import (
+    clear_component_registry,
+    get_component_registry,
+    register_component,
+    unregister_component,
+)
 
 if TYPE_CHECKING:
     from confluence.torch.module import DictModule
@@ -20,8 +26,12 @@ __all__ = [
     "DictModule",
     "DictModuleConfig",
     "ForwardConfig",
+    "clear_component_registry",
+    "get_component_registry",
     "load_dict_module_config",
+    "register_component",
     "resolve_dict_module_config",
+    "unregister_component",
 ]
 
 
